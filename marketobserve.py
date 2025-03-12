@@ -198,8 +198,8 @@ def ChangeDistPlot(data, time_windows=[1], frequencies=['W', 'M', 'Q', 'Y']):
             change = log_returns.resample(freq).sum()
             change = change.dropna()
             change = np.exp(change)-1
-            change_max = np.max(change)
-            change_min = np.min(change)
+            change_max = change.max()[0]
+            change_min = change.min()[0]
             # 获取对应的 bin 宽度
             bin_width = bin_widths[freq]
             # 计算 bin 的边界
