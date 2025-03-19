@@ -74,8 +74,8 @@ def BullBearPlot(data, time_window):
         # Loop through the data to plot segments with different colors
         for j in range(len(selected_df) - 1):
             x_vals = [selected_df.index[j], selected_df.index[j + 1]]
-            y_vals = [selected_df["Close"][j], selected_df["Close"][j + 1]]
-            color = 'red' if selected_df['IsBull'][j] < 0 else 'green'
+            y_vals = [selected_df["Close"].iloc[j], selected_df["Close"].iloc[j + 1]]
+            color = 'red' if selected_df['IsBull'].iloc[j] < 0 else 'green'
 
             fig.add_trace(go.Scatter(
                 x=x_vals,
@@ -195,11 +195,12 @@ def ChangeDistPlot(data, time_windows=[1], frequencies=['W', 'M', 'Q', 'Y']):
 
             # 计算对数收益率
             log_returns = np.log(subset / subset.shift(1))
-            change = log_returns.resample(freq).sum()
+            resample_freq = freq if freq == "W" else freq + "E"
+            change = log_returns.resample(resample_freq).sum()
             change = change.dropna()
             change = np.exp(change)-1
-            change_max = change.max()[0]
-            change_min = change.min()[0]
+            change_max = np.max(change)
+            change_min = np.min(change)
             # 获取对应的 bin 宽度
             bin_width = bin_widths[freq]
             # 计算 bin 的边界
@@ -219,7 +220,7 @@ def ChangeDistPlot(data, time_windows=[1], frequencies=['W', 'M', 'Q', 'Y']):
 
             # Slice lastest values of pd.series change
             current_values = change.tail(4)
-            current_values_lables = [f'{idx.date()}: {val[0]:.2%}' for idx, val in current_values.iterrows()]
+            current_values_lables = [f'{idx.date()}: {val.iloc[0]:.2%}' for idx, val in current_values.iterrows()]
 
             # show the values in the chart
             for k, label in enumerate(current_values_lables):
@@ -255,7 +256,7 @@ def ChangeDistPlot(data, time_windows=[1], frequencies=['W', 'M', 'Q', 'Y']):
             else:
                 text_color = 'black'
             
-            deviation = np.std(change)[0]
+            deviation = np.std(change.values)
 
             # Add bold style to the text
             text_weight = 'bold'
