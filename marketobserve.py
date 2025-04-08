@@ -96,6 +96,43 @@ def BullBearPlot(data, time_window):
 
 from matplotlib.ticker import PercentFormatter
 
+
+def options_chain(symbol):
+
+    tk = yf.Ticker(symbol)
+    print(tk.info)
+    # Expiration dates
+    exps = tk.options
+    # print(exps[1])
+    # Get options for each expiration
+    options = pd.DataFrame()
+    options_list = []
+    for e in exps:
+        opt = tk.option_chain(e)
+        calls_puts = pd.concat([opt.calls, opt.puts])
+        calls_puts['expirationDate'] = e
+        options_list.append(calls_puts)
+    
+    # Combine all options data
+    options = pd.concat(options_list, ignore_index=True)
+
+    # Bizarre error in yfinance that gives the wrong expiration date
+    # Add 1 day to get the correct expiration date
+    options['expirationDate'] = pd.to_datetime(options['expirationDate']) + dt.timedelta(days = 1)
+    options['dte'] = (options['expirationDate'] - dt.datetime.today()).dt.days / 365
+    
+    # Boolean column if the option is a CALL
+    options['CALL'] = options['contractSymbol'].str[4:].apply(
+        lambda x: "C" in x)
+    
+    options[['bid', 'ask', 'strike']] = options[['bid', 'ask', 'strike']].apply(pd.to_numeric)
+    options['mark'] = (options['bid'] + options['ask']) / 2 # Calculate the midpoint of the bid-ask
+    
+    # Drop unnecessary and meaningless columns
+    options = options.drop(columns = ['contractSize', 'currency', 'change', 'percentChange', 'lastTradeDate', 'lastPrice'])
+
+    return options
+
 def parse_time_window(window, latest_date):
     if isinstance(window, str):
         if window[-1] not in ['W', 'M', 'Q', 'Y']:
@@ -266,3 +303,43 @@ def ChangeDistPlot(data, time_windows=[1], frequencies=['W', 'M', 'Q', 'Y']):
 
     plt.tight_layout()
     plt.show()
+
+def yf_download(ticker, start_date, end_date, frequency='1d', progress=True, auto_adjust=False):
+    """
+    Download stock data from Yahoo Finance
+    
+    Parameters:
+    - ticker: Stock symbol (e.g., "^HSI")
+    - start_date: datetime.date or string in YYYY-MM-DD format
+    - end_date: datetime.date or string in YYYY-MM-DD format
+    - frequency: Data frequency ('1d', '1wk', '1mo')
+    - progress: Show download progress bar
+    - auto_adjust: Adjust all OHLC automatically
+    
+    Returns:
+    - DataFrame with stock data
+    """
+    df = yf.download(
+        ticker, 
+        start=start_date, 
+        end=end_date,
+        interval=frequency,
+        progress=progress, 
+        auto_adjust=auto_adjust
+    )
+    df.columns = df.columns.droplevel(1)
+    df.set_index(pd.DatetimeIndex(df.index), inplace=True)
+    # Reorder columns as specified
+    df = df[['Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume']]
+    return df
+
+    # download data from local file
+    # data = pd.read_excel("spx.xlsx",index_col="Date")
+    # data.columns = ["Close"]
+    # data = data.sort_index(ascending=True)
+
+    # # download data from xbbg
+    # from xbbg import blp
+    # data = blp.bdh("SPX Index","PX_LAST","1900-01-01") # HSI, NKY, SPX
+    # data.columns = ["Close"]
+    # data = data.sort_index(ascending=True)
