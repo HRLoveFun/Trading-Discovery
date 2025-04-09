@@ -1,13 +1,13 @@
-import yfinance as yf
 import pandas as pd
 import matplotlib.pyplot as plt
+import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
 import seaborn as sns
 import datetime as dt
 from matplotlib.ticker import PercentFormatter
-from scipy.stats import ks_2samp
+from scipy.stats import ks_2samp, percentileofscore
 
 
 
@@ -428,9 +428,10 @@ def oscillation(df):
     return data
 
 
-def tail_stats(df, feature, frequency, periods: list = [12, 36, 60, "ALL"], all_period_start: str = None, interpolation: str = "linear"):
+def tail_stats(df, feature, frequency, periods: list = [12, 36, 60, "ALL"], all_period_start: str = None,
+               interpolation: str = "linear"):
     """
-    计算不同时间周期的统计指标
+    计算不同时间周期的统计指标和表格信息，并合并到一个 DataFrame 中
     """
     if not isinstance(periods, list):
         raise TypeError("periods must be a list")
@@ -438,11 +439,21 @@ def tail_stats(df, feature, frequency, periods: list = [12, 36, 60, "ALL"], all_
         raise ValueError("periods must contain integers or strings")
 
     data_sources = create_data_sources(df, periods, all_period_start, frequency)
-
-    stats_index = pd.Index(["mean", "std", "skew", "kurt", "max", "99th", "95th", "90th"])
+    
+    last_three_index_list = df.index[-3:].strftime('%b%d').tolist()
+    stats_index = pd.Index(["mean", "std", "skew", "kurt", "max", "99th", "95th", "90th",]+ [last_three_index+'_val' for last_three_index in last_three_index_list] + [last_three_index+'_%th' for last_three_index in last_three_index_list] )
     stats_df = pd.DataFrame(index=stats_index)
 
+    if frequency == "ME":
+        bin_range = list(np.arange(0, 0.35, 0.05))
+    elif frequency == "W":
+        bin_range = list(np.arange(0, 0.18, 0.03))
+    else:
+        raise ValueError(f"Unsupported frequency: {frequency}. Supported frequencies are 'ME' and 'W'.")
+
+    interval_freq_dict = {}
     for period_name, data in data_sources.items():
+        # 计算统计指标
         stats_df[period_name] = [
             data[feature].mean(),
             data[feature].std(),
@@ -451,11 +462,35 @@ def tail_stats(df, feature, frequency, periods: list = [12, 36, 60, "ALL"], all_
             data[feature].max(),
             data[feature].quantile(0.99, interpolation=interpolation),
             data[feature].quantile(0.95, interpolation=interpolation),
-            data[feature].quantile(0.90, interpolation=interpolation)
+            data[feature].quantile(0.90, interpolation=interpolation),
+            data[feature].iloc[-3],
+            data[feature].iloc[-2],
+            data[feature].iloc[-1],
+            percentileofscore(data[feature], data[feature].iloc[-3]),
+            percentileofscore(data[feature], data[feature].iloc[-2]),
+            percentileofscore(data[feature], data[feature].iloc[-1])
+
         ]
 
-    return stats_df
+        # 计算直方图的累积密度
+        n, bins = np.histogram(data[feature], bins=bin_range, density=True)
+        cumulative_n = np.cumsum(n * np.diff(bins))
+        n_diff = np.insert(np.diff(cumulative_n), 0, cumulative_n[0])
 
+        bin_intervals = [(bins[i], bins[i + 1]) for i in range(len(bins) - 1)]
+        bin_info = {}
+
+        for _ in range(len(bin_intervals)):
+            bin_info[f"{bin_intervals[_]}"] = n_diff[_]
+
+        interval_freq_dict[period_name] = bin_info
+
+    interval_freq_df = pd.DataFrame(interval_freq_dict)
+
+    # 合并 stats_df 和 table_result_df
+    combined_df = pd.concat([stats_df, interval_freq_df])
+
+    return combined_df
 
 def tail_plot(df, feature, frequency, periods: list = [12, 36, 60, "ALL"], all_period_start: str = None, interpolation: str = "linear"):
     """
@@ -588,53 +623,54 @@ def days_of_frequency(frequency):
     return days
 
 
-def tail_table(df, feature, frequency, periods: list = [12, 36, 60, "ALL"], all_period_start: str = None, interpolation: str = "linear"):
-    """
-    **To Modify Ouput Table Information** 按每个时间段计算表格，输出每个时间段及其对应的表格，最后将结果存储在字典中返回
-    """
-    data_sources = create_data_sources(df, periods, all_period_start, frequency)
+# def tail_table(df, feature, frequency, periods: list = [12, 36, 60, "ALL"], all_period_start: str = None, interpolation: str = "linear"):
+#     """
+#     **To Modify Ouput Table Information** 按每个时间段计算表格，输出每个时间段及其对应的表格，最后将结果存储在字典中返回
+#     """
+#     data_sources = create_data_sources(df, periods, all_period_start, frequency)
 
-    if frequency == "ME":
-        bin_range = list(np.arange(0, 0.35, 0.05))
-    elif frequency == "W":
-        bin_range = list(np.arange(0, 0.18, 0.03))
-    else:
-        raise ValueError(f"Unsupported frequency: {frequency}. Supported frequencies are 'ME' and 'W'.")
+#     if frequency == "ME":
+#         bin_range = list(np.arange(0, 0.35, 0.05))
+#     elif frequency == "W":
+#         bin_range = list(np.arange(0, 0.18, 0.03))
+#     else:
+#         raise ValueError(f"Unsupported frequency: {frequency}. Supported frequencies are 'ME' and 'W'.")
 
-    result_df = pd.DataFrame()
-    for period_name, data in data_sources.items():
-        # 计算直方图的累积密度
-        n, bins = np.histogram(data[feature], bins=bin_range, density=True)
-        cumulative_n = np.cumsum(n * np.diff(bins))
-        n_diff = np.insert(np.diff(cumulative_n), 0, cumulative_n[0])
+#     result_dict = {}
+#     for period_name, data in data_sources.items():
+#         # 计算直方图的累积密度
+#         n, bins = np.histogram(data[feature], bins=bin_range, density=True)
+#         cumulative_n = np.cumsum(n * np.diff(bins))
+#         n_diff = np.insert(np.diff(cumulative_n), 0, cumulative_n[0])
 
-        percentiles = [0.90, 0.95, 0.99]
+#         percentiles = [0.90, 0.95, 0.99]
 
-        # 计算百分位数
-        percentile_values = [data[feature].quantile(p, interpolation=interpolation) for p in percentiles]
+#         # 计算百分位数
+#         percentile_values = [data[feature].quantile(p, interpolation=interpolation) for p in percentiles]
 
-        # 获取最后三个数据点
-        last_three_values = data[feature].iloc[-3:]
-        last_three_dates = last_three_values.index.strftime('%b%d')
-        bin_intervals = [(bins[i], bins[i + 1]) for i in range(len(bins) - 1)]
+#         # 获取最后三个数据点
+#         last_three_values = data[feature].iloc[-3:]
+#         last_three_dates = last_three_values.index.strftime('%b%d')
+#         bin_intervals = [(bins[i], bins[i + 1]) for i in range(len(bins) - 1)]
 
-        bin_info = {
-            "Period": period_name,
-        }
+#         bin_info = {}
 
-        for _ in range(len(bin_intervals)):
-            bin_info[f"{bin_intervals[_]}"] = f'{n_diff[_]:.0%}'
+#         for _ in range(len(bin_intervals)):
+#             bin_info[f"{bin_intervals[_]}"] = f'{n_diff[_]:.0%}'
 
-        for _ in range(len(percentiles)):
-            bin_info[f"{percentiles[_]}th"] = f'{percentile_values[_]:.1%}'
+#         for _ in range(len(percentiles)):
+#             bin_info[f"{percentiles[_]}th"] = f'{percentile_values[_]:.1%}'
 
-        for _ in range(len(last_three_dates)):
-            bin_info[f"{last_three_dates[_]}"] = f'{last_three_values.iloc[_]:.1%}'
+#         for _ in range(len(last_three_dates)):
+#             bin_info[f"{last_three_dates[_]}"] = f'{last_three_values.iloc[_]:.1%}'
 
-        table = pd.DataFrame([bin_info])
-        result_df = pd.concat([result_df, table], ignore_index=True)
+#         # for key, value in bin_info.items():
+#         #     if key not in result_dict:
+#         #         result_dict[key] = []
+#         result_dict[period_name] = bin_info
 
-    return result_df
+#     result_df = pd.DataFrame(result_dict)
+#     return result_df
 
 
 def period_gap_stats(df, feature, frequency, periods: list = [12, 36, 60, "ALL"], all_period_start: str = None, interpolation: str = "linear"):
