@@ -7,6 +7,7 @@ import numpy as np
 import seaborn as sns
 import datetime as dt
 from matplotlib.ticker import PercentFormatter
+from scipy.stats import ks_2samp
 
 
 
@@ -94,7 +95,7 @@ def BullBearPlot(data, time_window):
     fig.show()
 
 
-from matplotlib.ticker import PercentFormatter
+
 
 
 def options_chain(symbol):
@@ -304,7 +305,7 @@ def ChangeDistPlot(data, time_windows=[1], frequencies=['W', 'M', 'Q', 'Y']):
     plt.tight_layout()
     plt.show()
 
-def yf_download(ticker, start_date, end_date, frequency='1d', progress=True, auto_adjust=False):
+def yf_download(ticker, start_date, end_date, interval='1d', progress=True, auto_adjust=False):
     """
     Download stock data from Yahoo Finance
     
@@ -312,7 +313,7 @@ def yf_download(ticker, start_date, end_date, frequency='1d', progress=True, aut
     - ticker: Stock symbol (e.g., "^HSI")
     - start_date: datetime.date or string in YYYY-MM-DD format
     - end_date: datetime.date or string in YYYY-MM-DD format
-    - frequency: Data frequency ('1d', '1wk', '1mo')
+    - interval: Data interval ('1d', '1wk', '1mo')
     - progress: Show download progress bar
     - auto_adjust: Adjust all OHLC automatically
     
@@ -323,7 +324,7 @@ def yf_download(ticker, start_date, end_date, frequency='1d', progress=True, aut
         ticker, 
         start=start_date, 
         end=end_date,
-        interval=frequency,
+        interval=interval,
         progress=progress, 
         auto_adjust=auto_adjust
     )
@@ -343,3 +344,404 @@ def yf_download(ticker, start_date, end_date, frequency='1d', progress=True, aut
     # data = blp.bdh("SPX Index","PX_LAST","1900-01-01") # HSI, NKY, SPX
     # data.columns = ["Close"]
     # data = data.sort_index(ascending=True)
+
+def create_data_sources(df, periods, all_period_start, frequency):
+    """
+    创建不同时间周期的数据来源
+    """
+    current_date = pd.Timestamp.now()
+
+    # 根据 frequency 筛选数据到本周/本月/本季度的第一天
+    if frequency == 'ME':
+        end_date = current_date.replace(day=1)
+    elif frequency == 'W':
+        end_date = current_date - pd.DateOffset(days=current_date.weekday())
+    elif frequency == 'QE':
+        end_date = current_date - pd.tseries.offsets.QuarterBegin()
+    else:
+        raise ValueError("Invalid frequency value. Allowed values are 'ME', 'W', 'QE'.")
+
+    df = df[df.index < end_date]
+    last_date = df.index[-1]
+
+    if all_period_start is None:
+        all_period_start = "2010-01-01"
+
+    data_sources = {}
+    for period in periods:
+        if isinstance(period, int):
+            if frequency in ['ME', 'W']:
+                start_date = last_date - pd.DateOffset(months=period - 1)
+            elif frequency == 'QE':
+                start_date = last_date - pd.DateOffset(quarters=period - 1)
+            col_name = f"{start_date.strftime('%y%b')}-{last_date.strftime('%y%b')}"
+            data_sources[col_name] = df.loc[df.index >= start_date]
+        elif period == "ALL":
+            col_name = f"{pd.to_datetime(all_period_start).strftime('%y%b')}-{last_date.strftime('%y%b')}"
+            data_sources[col_name] = df.loc[df.index >= all_period_start]
+        else:
+            raise ValueError("Invalid period value")
+
+    return data_sources
+
+
+def refrequency(df, frequency: str):
+    """
+    对数据进行重采样
+    """
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise ValueError("DataFrame index must be a DatetimeIndex")
+    if not {'Open', 'High', 'Low', 'Close'}.issubset(df.columns):
+        raise ValueError("DataFrame must contain OHLC columns")
+
+    try:
+        refrequency_df = df.resample(frequency).agg({
+            'Open': 'first',
+            'High': 'max',
+            'Low': 'min',
+            'Close': 'last',
+            'Adj Close': 'last',
+            'Volume': 'sum'
+        }).dropna()
+
+    except KeyError as e:
+        import logging
+        logging.error(f"Missing column {e} in DataFrame")
+        raise ValueError(f"Error processing data: Missing column {e}")
+    except Exception as e:
+        import logging
+        logging.error(f"Unexpected error: {str(e)}")
+        raise ValueError(f"Error processing data: {str(e)}")
+
+    return refrequency_df
+
+
+def oscillation(df):
+    """
+    计算震荡指标
+    """
+    data = df[['Open', 'High', 'Low', 'Close']].copy()
+    data['LastClose'] = data["Close"].shift(1)
+    data["Oscillation"] = data["High"] - data["Low"]
+    data["OscillationPct"] = (data["Oscillation"] / data['LastClose'])
+    data = data.dropna()
+    return data
+
+
+def tail_stats(df, feature, frequency, periods: list = [12, 36, 60, "ALL"], all_period_start: str = None, interpolation: str = "linear"):
+    """
+    计算不同时间周期的统计指标
+    """
+    if not isinstance(periods, list):
+        raise TypeError("periods must be a list")
+    if not all(isinstance(p, (int, str)) for p in periods):
+        raise ValueError("periods must contain integers or strings")
+
+    data_sources = create_data_sources(df, periods, all_period_start, frequency)
+
+    stats_index = pd.Index(["mean", "std", "skew", "kurt", "max", "99th", "95th", "90th"])
+    stats_df = pd.DataFrame(index=stats_index)
+
+    for period_name, data in data_sources.items():
+        stats_df[period_name] = [
+            data[feature].mean(),
+            data[feature].std(),
+            data[feature].skew(),
+            data[feature].kurtosis(),
+            data[feature].max(),
+            data[feature].quantile(0.99, interpolation=interpolation),
+            data[feature].quantile(0.95, interpolation=interpolation),
+            data[feature].quantile(0.90, interpolation=interpolation)
+        ]
+
+    return stats_df
+
+
+def tail_plot(df, feature, frequency, periods: list = [12, 36, 60, "ALL"], all_period_start: str = None, interpolation: str = "linear"):
+    """
+    绘制不同时间周期的特征值分布
+    """
+    data_sources = create_data_sources(df, periods, all_period_start, frequency)
+
+    if frequency == "ME":
+        bin_range = list(np.arange(0, 0.35, 0.05))
+    elif frequency == "W":
+        bin_range = list(np.arange(0, 0.18, 0.03))
+
+    for period_name, data in data_sources.items():
+        plt.figure(figsize=(10, 6))
+        sns.set_style("darkgrid")
+        n, bins, patches = plt.hist(data[feature], bins=bin_range, alpha=0.5, color='skyblue', density=True, cumulative=True)
+
+        n_diff = np.insert(np.diff(n), 0, n[0])
+        for rect, h_diff, h in zip(patches, n_diff, n):
+            height = rect.get_height()
+            plt.text(rect.get_x() + rect.get_width() / 2, height, f'{h_diff:.0%}/{h:.0%}', ha='center', va='bottom', size=12)
+
+        percentiles = [data[feature].quantile(p, interpolation=interpolation) for p in [0.90, 0.95, 0.99]]
+        for p, val in zip([90, 95, 99], percentiles):
+            plt.axvline(val, color='red', linestyle=':', alpha=0.3, label=f'{p}th: {val:.1%}')
+
+        last_three = data[feature].iloc[-3:]
+        last_three_dates = last_three.index.strftime('%b%d')
+        for val, date, grayscale in zip(last_three, last_three_dates, np.arange(0.7, 0, -0.3)):
+            plt.scatter(val, 0, color=str(grayscale), s=100, zorder=5, label=f'{date}: {val:.1%}')
+
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.title(f"Distribution of {feature} - {period_name}")
+        plt.xlabel(f"{feature} (%)")
+        plt.ylabel("Density")
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.show()
+
+
+def calculate_projections(data, feature, percentile, interpolation, bias_weight):
+    data["ProjectHigh"] = data["LastClose"] + data["LastClose"] * data[feature].quantile(percentile, interpolation=interpolation) / 100 * bias_weight
+    data["ProjectLow"] = data["LastClose"] - data["LastClose"] * data[feature].quantile(percentile, interpolation=interpolation) / 100 * (1 - bias_weight)
+    data["ActualClosingStatus"] = np.where(data["Close"] > data["ProjectHigh"], 1,
+                                           np.where(data["Close"] < data["ProjectLow"], -1, 0))
+    realized_bias = ((data["ActualClosingStatus"] == 1).sum() - ((data["ActualClosingStatus"] == -1).sum())) / len(data)
+
+    return realized_bias
+
+
+def volatility_projection(df, feature, frequency: str = 'ME', percentile: float = 0.90, prefer_bias: float = None, periods: list = [12, 36, 60, "ALL"], all_period_start: str = None, interpolation: str = "linear"):
+    """
+    计算不同时间周期的波动率预测
+    """
+    if not isinstance(periods, list):
+        raise TypeError("periods must be a list")
+    if not all(isinstance(p, (int, str)) for p in periods):
+        raise ValueError("periods must contain integers or strings")
+
+    if feature == "OscillationPct":
+        refrequency_data = refrequency(df, frequency=frequency)
+        refrequency_feature = oscillation(refrequency_data)
+
+        data_sources = create_data_sources(refrequency_feature, periods, all_period_start, frequency)
+
+        volatility_projection_index = pd.Index(
+            [
+                f"Last: {refrequency_feature.index[-2].strftime('%y%b%d')}",
+                f"{percentile}th {feature}",
+                "RealizedBias%",
+                "ProjectedHighWeight%",
+                "ProjHigh",
+                "ProjLow",
+                f"Today: {df.index[-1].strftime('%y%b%d')}"
+            ]
+        )
+        volatility_projection_df = pd.DataFrame(index=volatility_projection_index)
+
+        for period_name, data in data_sources.items():
+            period_end_close = data["Close"].iloc[-1]
+            assumed_volatility = data[feature].quantile(percentile, interpolation=interpolation)
+
+            if prefer_bias is not None:
+                # 寻找最佳 bias_weight 的逻辑
+                proj_high_weights = np.linspace(0.1, 0.9, 90)  # 在 0 到 1 之间生成 100 个等间距的 bias_weight 值
+                min_error = float('inf')
+                best_proj_high_weight = 0
+                for proj_high_weight in proj_high_weights:
+                    realized_bias = calculate_projections(data.copy(), feature, percentile, interpolation, proj_high_weight)
+                    error = abs(realized_bias - prefer_bias)
+                    if error < min_error:
+                        min_error = error
+                        best_proj_high_weight = proj_high_weight
+                proj_high_weight = best_proj_high_weight
+
+            else:
+                proj_high_weight = 0.5
+
+            realized_bias = calculate_projections(data, feature, percentile, interpolation, proj_high_weight)
+
+            proj_high = period_end_close + period_end_close * assumed_volatility * proj_high_weight
+            proj_low = period_end_close - period_end_close * assumed_volatility * (1 - proj_high_weight)
+
+            last_close = df["Close"].iloc[-1]
+
+            volatility_projection_df[period_name] = [
+                period_end_close,
+                assumed_volatility,
+                realized_bias * 100,
+                proj_high_weight * 100,
+                proj_high,
+                proj_low,
+                last_close
+            ]
+        return volatility_projection_df
+    else:
+        raise ValueError("Invalid feature value")
+
+
+def days_of_frequency(frequency):
+    if frequency == "W":
+        days = 5
+    elif frequency == "ME":
+        days = 21
+    elif frequency == "QE":
+        days = 63
+    else:
+        raise ValueError("Invalid frequency, input one of ['W', 'ME', 'QE']")
+
+    return days
+
+
+def tail_table(df, feature, frequency, periods: list = [12, 36, 60, "ALL"], all_period_start: str = None, interpolation: str = "linear"):
+    """
+    **To Modify Ouput Table Information** 按每个时间段计算表格，输出每个时间段及其对应的表格，最后将结果存储在字典中返回
+    """
+    data_sources = create_data_sources(df, periods, all_period_start, frequency)
+
+    if frequency == "ME":
+        bin_range = list(np.arange(0, 0.35, 0.05))
+    elif frequency == "W":
+        bin_range = list(np.arange(0, 0.18, 0.03))
+    else:
+        raise ValueError(f"Unsupported frequency: {frequency}. Supported frequencies are 'ME' and 'W'.")
+
+    result_df = pd.DataFrame()
+    for period_name, data in data_sources.items():
+        # 计算直方图的累积密度
+        n, bins = np.histogram(data[feature], bins=bin_range, density=True)
+        cumulative_n = np.cumsum(n * np.diff(bins))
+        n_diff = np.insert(np.diff(cumulative_n), 0, cumulative_n[0])
+
+        percentiles = [0.90, 0.95, 0.99]
+
+        # 计算百分位数
+        percentile_values = [data[feature].quantile(p, interpolation=interpolation) for p in percentiles]
+
+        # 获取最后三个数据点
+        last_three_values = data[feature].iloc[-3:]
+        last_three_dates = last_three_values.index.strftime('%b%d')
+        bin_intervals = [(bins[i], bins[i + 1]) for i in range(len(bins) - 1)]
+
+        bin_info = {
+            "Period": period_name,
+        }
+
+        for _ in range(len(bin_intervals)):
+            bin_info[f"{bin_intervals[_]}"] = f'{n_diff[_]:.0%}'
+
+        for _ in range(len(percentiles)):
+            bin_info[f"{percentiles[_]}th"] = f'{percentile_values[_]:.1%}'
+
+        for _ in range(len(last_three_dates)):
+            bin_info[f"{last_three_dates[_]}"] = f'{last_three_values.iloc[_]:.1%}'
+
+        table = pd.DataFrame([bin_info])
+        result_df = pd.concat([result_df, table], ignore_index=True)
+
+    return result_df
+
+
+def period_gap_stats(df, feature, frequency, periods: list = [12, 36, 60, "ALL"], all_period_start: str = None, interpolation: str = "linear"):
+    """
+    计算不同时间周期的频率缺口统计
+    Given df, feature, and frequency,
+        for each period in frequency,
+            compute the gap_return = percentage change of first date open over last period close
+            compute statistics of gap_return
+            compute frequency_return = percentage change of last date close over last period close
+            set days_of_period = len(df[rows only in the period])
+            compare distribution of (gap_return+1)**days_of_period-1 with frequency_return distribution
+        return distribution table of gap_return 
+    """
+    data_sources = create_data_sources(df, periods, all_period_start, frequency)
+
+    stats_index = pd.Index(["mean", "std", "skew", "kurt", "max", "99th", "95th", "90th", "10th", "05th", "01st", "min", "p-value"])
+    gap_return_stats_df = pd.DataFrame(index=stats_index)
+
+    if feature == "PeriodGap":
+        for period_name, data in data_sources.items():
+            if len(data) > 0:
+                # 计算 gap_return
+                gap_return = (data["Open"] / data["LastClose"] - 1)
+                period_return = (data["Close"] / data["LastClose"] - 1)
+
+                # 计算 days_of_period
+                days_of_period = days_of_frequency(frequency)
+
+                # 计算 (gap_return+1)**days_of_period-1
+                compounded_gap_return = (1 + gap_return) ** days_of_period - 1
+                # 计算 period_return 和 compounded_gap_return 相似程度的统计检验
+                _, p_value = ks_2samp(compounded_gap_return, period_return)
+
+                # 计算 gap_return 的统计信息
+                gap_return_stats_df[period_name] = [
+                    gap_return.mean(),
+                    gap_return.std(),
+                    gap_return.skew(),
+                    gap_return.kurtosis(),
+                    gap_return.max(),
+                    gap_return.quantile(0.99, interpolation=interpolation),
+                    gap_return.quantile(0.95, interpolation=interpolation),
+                    gap_return.quantile(0.90, interpolation=interpolation),
+                    gap_return.quantile(0.10, interpolation=interpolation),
+                    gap_return.quantile(0.05, interpolation=interpolation),
+                    gap_return.quantile(0.01, interpolation=interpolation),
+                    gap_return.min(),
+                    p_value
+                ]
+
+    return gap_return_stats_df
+
+
+def option_matrix(ticker, option_position):
+    """
+    option_position: dataframe. columns: option_type: values of [LC,SC,LP,SP]; strike: integer, quantity: integer, premium: float
+    """
+
+    # Get the last price of ticker
+    close = yf.download(ticker, start=dt.datetime.now().date())[["Close"]].iloc[-1,-1]
+
+    # Create default option_matrix dataframe, columns = ['Price', 'SC', 'SP', 'LC', 'LP'], index = range of close*0.9, close*1.1
+    change_range = np.linspace(0.9, 1.1, 20)
+    option_matrix_df = pd.DataFrame(index=change_range)
+    option_matrix_df['price'] = (close*change_range).astype(int)
+    option_matrix_df['SC'] = 0.0
+    option_matrix_df['SP'] = 0.0
+    option_matrix_df['LC'] = 0.0
+    option_matrix_df['LP'] = 0.0
+
+    for _, row in option_position.iterrows():
+        option_type = row["option_type"]
+        strike = row["strike"]
+        quantity = row["quantity"]
+        premium = row["premium"]
+
+        print(f"Option type: {option_type}, Strike: {strike}, Premium: {premium}")
+
+        if option_type == 'SC':
+            option_matrix_df.loc[option_matrix_df['price'] < strike, 'SC'] = premium
+            option_matrix_df.loc[option_matrix_df['price'] >= strike, 'SC'] = premium + (strike - option_matrix_df.loc[option_matrix_df['price'] >= strike, 'price'])
+            option_matrix_df['SC'] *= quantity
+        elif option_type == 'SP':
+            option_matrix_df.loc[option_matrix_df['price'] > strike, 'SP'] = premium
+            option_matrix_df.loc[option_matrix_df['price'] <= strike, 'SP'] = premium - (strike - option_matrix_df.loc[option_matrix_df['price'] <= strike, 'price'])
+            option_matrix_df['SP'] *= quantity
+
+        elif option_type == 'LC':
+            option_matrix_df.loc[option_matrix_df['price'] > strike, 'LC'] = option_matrix_df.loc[option_matrix_df['price'] > strike, 'price'] - strike - premium
+            option_matrix_df.loc[option_matrix_df['price'] <= strike, 'LC'] = - premium
+            option_matrix_df['LC'] *= quantity
+        
+        elif option_type == 'LP':
+            option_matrix_df.loc[option_matrix_df['price'] > strike, 'LP'] = - premium
+            option_matrix_df.loc[option_matrix_df['price'] <= strike, 'LP'] = - option_matrix_df.loc[option_matrix_df['price'] <= strike, 'price'] + strike - premium
+            option_matrix_df['LP'] *= quantity
+
+        else:
+            raise ValueError("Invalid option type")
+
+
+    # Calculate the PnL
+    option_matrix_df['PnL'] = option_matrix_df[['SC', 'SP', 'LC', 'LP']].sum(axis=1)
+
+
+
+    return option_matrix_df
+
+    
