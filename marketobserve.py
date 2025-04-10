@@ -428,6 +428,99 @@ def oscillation(df):
     return data
 
 
+
+def percentile_stats(df, feature, percentile, frequency, periods: list = [12, 36, 60, "ALL"], all_period_start: str = None,
+                     interpolation: str = "linear"):
+    """
+    计算不同时间周期的统计指标和表格信息，并合并到一个 DataFrame 中
+    """
+    if not isinstance(periods, list):
+        raise TypeError("periods must be a list")
+    if not all(isinstance(p, (int, str)) for p in periods):
+        raise ValueError("periods must contain integers or strings")
+
+    data_sources = create_data_sources(df, periods, all_period_start, frequency)
+
+    last_three_index_list = df.index[-3:].strftime('%b%d').tolist()
+    stats_index = pd.Index(
+        ["mean", "std", "skew", "kurt", "max", "75th", "25th",]
+        # + [last_three_index+'_val' for last_three_index in last_three_index_list] 
+        # + [last_three_index+'_%th' for last_three_index in last_three_index_list]
+        + ["prob_next_per"] 
+    )
+    stats_df = pd.DataFrame(index=stats_index)
+
+    if frequency == "ME":
+        bin_range = list(np.arange(0, 21, 1))
+    elif frequency == "W":
+        bin_range = list(np.arange(1, 101, 10))
+    else:
+        raise ValueError(f"Unsupported frequency: {frequency}. Supported frequencies are 'ME' and 'W'.")
+
+    interval_freq_dict = {}
+    for period_name, data in data_sources.items():
+        # 计算每个值的百分位数
+        data["percentile"] = data[feature].apply(lambda x: percentileofscore(data[feature], x))
+        data["sequence"] = range(len(data))
+        mask_percentile = data["percentile"] >= percentile
+        mask_first_last = (data.index == data.index[0]) | (data.index == data.index[-1])
+        data = data[mask_percentile | mask_first_last].copy()
+        data["interval"] = data["sequence"].diff()
+        data = data.dropna()
+
+        latest_interval = data["interval"].iloc[-1]
+        mask_beyond_latest_interval = data["interval"] > latest_interval
+        mask_latest_interval_plus = data["interval"] == latest_interval + 1
+
+
+
+        if len(data[mask_latest_interval_plus]) == 0:
+            prob_next_per = None
+        else:
+            prob_next_per = len(data[mask_latest_interval_plus]) / len(data[mask_beyond_latest_interval])
+
+        col = "interval"
+        stats_df[period_name] = [
+            data[col].mean(),
+            data[col].std(),
+            data[col].skew(),
+            data[col].kurtosis(),
+            data[col].max(),
+            data[col].quantile(0.75, interpolation=interpolation),
+            data[col].quantile(0.25, interpolation=interpolation),
+            # data[col].index[-3],
+            # data[col].index[-2],
+            # data[col].index[-1],
+            # percentileofscore(data[col], data[col].iloc[-3]),
+            # percentileofscore(data[col], data[col].iloc[-2]),
+            # percentileofscore(data[col], data[col].iloc[-1]),
+            prob_next_per
+        ]
+
+        # 计算直方图的累积密度
+        n, bins = np.histogram(data[col], bins=bin_range, density=True)
+        if n.sum() == 0:
+            cumulative_n = np.zeros_like(n)
+        else:
+            cumulative_n = np.cumsum(n * np.diff(bins))
+        n_diff = np.insert(np.diff(cumulative_n), 0, cumulative_n[0])
+
+        bin_intervals = [(bins[i], bins[i + 1]) for i in range(len(bins) - 1)]
+        bin_info = {}
+
+        for i in range(len(bin_intervals)):
+            bin_info[f"{bin_intervals[i]}"] = n_diff[i]
+
+        interval_freq_dict[period_name] = bin_info
+
+    interval_freq_df = pd.DataFrame(interval_freq_dict)
+
+    # 合并 stats_df 和 table_result_df
+    combined_df = pd.concat([stats_df, interval_freq_df])
+
+    return combined_df
+
+
 def tail_stats(df, feature, frequency, periods: list = [12, 36, 60, "ALL"], all_period_start: str = None,
                interpolation: str = "linear"):
     """
@@ -469,7 +562,6 @@ def tail_stats(df, feature, frequency, periods: list = [12, 36, 60, "ALL"], all_
             percentileofscore(data[feature], data[feature].iloc[-3]),
             percentileofscore(data[feature], data[feature].iloc[-2]),
             percentileofscore(data[feature], data[feature].iloc[-1])
-
         ]
 
         # 计算直方图的累积密度
