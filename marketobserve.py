@@ -14,7 +14,7 @@ from matplotlib.ticker import PercentFormatter
 from scipy.stats import ks_2samp, percentileofscore
 
 
-yf.enable_debug_mode()
+# yf.enable_debug_mode()
 
 # 辅助函数：解析时间窗口
 def parse_time_window(window, latest_date):
